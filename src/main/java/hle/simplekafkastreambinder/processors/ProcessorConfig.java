@@ -27,10 +27,11 @@ public class ProcessorConfig {
                 .map((k,v) -> KeyValue.pair(k, String.format("%s : %s", k, v)));
     }
 
-    // groupByKey -> windowBy -> Reduce -> FilterNot -> Suppress -> toStream
+    // KStream: groupByKey -> windowBy -> Reduce -> Suppress -> toStream -> FilterNot
+    // KTable: Materialize -> suppress -> toStream -> FilterNot
     @Bean
-    public BiFunction<KStream<String, String>, KStream<String, String>, KStream<String, String>> windowFinalPath() {
-        return (pdStream, shieldStream) -> pdStream.outerJoin(shieldStream, (pdScore, shieldScore) -> {
+    public BiFunction<KTable<String, String>, KTable<String, String>, KStream<String, String>> windowFinalPath() {
+        return (pdTable, shieldTable) -> pdTable.outerJoin(shieldTable, (pdScore, shieldScore) -> {
             if (pdScore == null) {
                 return "Absence PD";
             } else if (shieldScore == null) {
@@ -38,13 +39,10 @@ public class ProcessorConfig {
             } else {
                 return "normal";
             }
-        }, JoinWindows.of(Duration.ofMinutes(1)), StreamJoined.with(Serdes.String(), Serdes.String(), Serdes.String()))
-                .groupByKey(Grouped.with(Serdes.String(), Serdes.String()))
-                .windowedBy(TimeWindows.ofSizeWithNoGrace(Duration.ofMinutes(1)))
-                .reduce((aggValue, newValue) -> newValue)
-                .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()))
+        }, Materialized.with(Serdes.String(), Serdes.String()))
+                .suppress(Suppressed.untilTimeLimit(Duration.ofMinutes(1), Suppressed.BufferConfig.unbounded()))
                 .toStream()
                 .filterNot((k,v) -> v.equals("normal"))
-                .map((k,v) -> KeyValue.pair(k.key(), String.format("%s : %s", k.key(), v)));
+                .map((k,v) -> KeyValue.pair(k, String.format("%s : %s", k, v)));
     }
 }
