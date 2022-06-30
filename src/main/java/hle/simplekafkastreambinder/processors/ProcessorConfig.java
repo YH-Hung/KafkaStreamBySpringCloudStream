@@ -1,10 +1,15 @@
 package hle.simplekafkastreambinder.processors;
 
+import hle.simplekafkastreambinder.dto.RatingResult;
+import hle.simplekafkastreambinder.dto.ScoreResult;
+import hle.simplekafkastreambinder.service.RatingService;
+import org.apache.kafka.common.serialization.Serde;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.streams.KeyValue;
 import org.apache.kafka.streams.kstream.*;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.kafka.support.serializer.JsonSerde;
 
 import java.time.Duration;
 import java.util.function.BiFunction;
@@ -13,29 +18,31 @@ import java.util.function.BiFunction;
 public class ProcessorConfig {
 
     @Bean
-    public BiFunction<KStream<String, String>, KStream<String, String>, KStream<String, String>> normalPath() {
-        return (pdStream, shieldStream) -> pdStream.join(shieldStream, (pdScore, shieldScore) -> {
-            try {
-                int pdValue = Integer.parseInt(pdScore);
-                int shieldValue = Integer.parseInt(shieldScore);
-                int integratedScore = pdValue + shieldValue;
-                return String.format("pd: %d, shield: %d, integrated: %d", pdValue, shieldValue, integratedScore);
-            } catch (NumberFormatException e) {
-                return "Bad numeric value";
-            }
-        }, JoinWindows.of(Duration.ofMinutes(1)), StreamJoined.with(Serdes.String(), Serdes.String(), Serdes.String()))
-                .map((k,v) -> KeyValue.pair(k, String.format("%s : %s", k, v)));
+    public Serde<ScoreResult> scoreResultJsonSerde(){
+        return new JsonSerde<>(ScoreResult.class);
+    }
+
+    @Bean
+    public Serde<RatingResult> ratingResultJsonSerde() {
+        return new JsonSerde<>(RatingResult.class);
+    }
+
+    @Bean
+    public BiFunction<KStream<String, ScoreResult>, KStream<String, ScoreResult>, KStream<String, RatingResult>> normalPath(RatingService ratingService) {
+        return (pdStream, shieldStream) -> pdStream.join(shieldStream, ratingService::integrateRate
+        , JoinWindows.of(Duration.ofMinutes(1)),
+            StreamJoined.with(Serdes.String(), scoreResultJsonSerde(), scoreResultJsonSerde()));
     }
 
     // KStream: groupByKey -> windowBy -> Reduce -> Suppress -> toStream -> FilterNot
     // KTable: Materialize -> suppress -> toStream -> FilterNot
     @Bean
-    public BiFunction<KTable<String, String>, KTable<String, String>, KStream<String, String>> windowFinalPath() {
+    public BiFunction<KTable<String, ScoreResult>, KTable<String, ScoreResult>, KStream<String, RatingResult>> windowFinalPath(RatingService ratingService) {
         return (pdTable, shieldTable) -> pdTable.outerJoin(shieldTable, (pdScore, shieldScore) -> {
             if (pdScore == null) {
-                return "Absence PD";
+                return String.format("%s pd absence", shieldScore.getName());
             } else if (shieldScore == null) {
-                return "Absence Shield";
+                return String.format("%s shield absence", pdScore.getName());
             } else {
                 return "normal";
             }
@@ -43,6 +50,6 @@ public class ProcessorConfig {
                 .suppress(Suppressed.untilTimeLimit(Duration.ofMinutes(1), Suppressed.BufferConfig.unbounded()))
                 .toStream()
                 .filterNot((k,v) -> v.equals("normal"))
-                .map((k,v) -> KeyValue.pair(k, String.format("%s : %s", k, v)));
+                .map((k,v) -> KeyValue.pair(k, ratingService.sideAbsenceRate(v)));
     }
 }
